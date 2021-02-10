@@ -1,0 +1,644 @@
+---
+title: "BS6202_Group Project"
+date: "1/15/2021"
+output: html_document
+---
+
+# 1. Load Library and Data
+
+```{r, message = FALSE, warnings = FALSE}
+library(tidyverse)
+library(DESeq2)
+library(dplyr)
+library(ggrepel)
+library(factoextra)
+```
+
+Load the meta data & gene counts:
+
+```{r}
+meta <- read.csv('colData.csv')
+meta <- meta[,(2:3)]
+```
+
+```{r}
+df <- read.csv('countData.csv')
+rownames(df) <- df$X
+df <- df[,(2:20)]
+```
+
+Import gene name mapping:
+```{r}
+gene_mapping <- read.csv('gene_mapping.csv')
+```
+
+
+Check if all samples in `df` have its corresponding information in `meta`:
+```{r}
+all(colnames(df) %in% meta$Run)
+```
+
+```{r}
+colSums(df)
+median(colSums(df))
+dim(df)
+```
+
+```{r}
+# plot variance against mean
+mean_counts <- apply(df[, colnames(df) %in% c('SRR1027186', 'SRR1027185', 'SRR1027184', 'SRR1027187', 'SRR1027183')], 1, mean)
+variance_counts <- apply(df[, colnames(df) %in% c('SRR1027186', 'SRR1027185', 'SRR1027184', 'SRR1027187', 'SRR1027183')], 1, var)
+mean_var <- data.frame(mean_counts, variance_counts)
+
+ggplot(mean_var) +
+        geom_jitter(aes(x=mean_counts, y=variance_counts)) + 
+        geom_line(aes(x=mean_counts, y=mean_counts, color="red")) +
+        scale_y_log10() +
+        scale_x_log10()
+```
+
+# 2. Differential expression analysis using DESeq2
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = df, colData = meta, design = ~ Condition)
+```
+
+Remove genes with 0 counts across all samples:
+```{r}
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dim(dds)
+```
+
+
+Conduct DESeq:
+```{r}
+dds_p <- DESeq(dds, test = c('Wald'))
+```
+
+## 2.1 Common DEGs in ALL cancer types compared against healthy samples
+
+```{r}
+# result of TNBC vs normal
+res_TN <- results(dds_p, contrast = c('Condition', 'TNBC', 'H'))
+res_TN
+```
+
+Sort the result table by `log2FoldChange` and filter out any genes with `padj` > 0.1 (FDR):
+```{r}
+resTN_ord_log2 <- res_TN[order(abs(res_TN$log2FoldChange), decreasing = TRUE),] # sort the genes according to descending log2FoldChange
+resTN_ord_log2 <- resTN_ord_log2[!is.na(resTN_ord_log2$padj), ] # exclude gene with padj as NA
+resTN_ord_log2 <- resTN_ord_log2[resTN_ord_log2$padj < 0.1, ]
+resTN_ord_log2
+```
+
+Apply the same methods to get the comparison result between the other pairs:
+
+- HER2 vs Normal
+- NTNBC vs Normal
+
+```{r}
+# HER2 VS NORMAL
+res_HN <- results(dds_p, contrast = c('Condition', 'HER2', 'H'))
+
+resHN_ord_log2 <- res_HN[order(abs(res_HN$log2FoldChange), decreasing = TRUE),] # sort the genes according to descending log2FoldChange
+resHN_ord_log2 <- resHN_ord_log2[!is.na(resHN_ord_log2$padj), ] # exclude gene with padj as NA
+resHN_ord_log2 <- resHN_ord_log2[resHN_ord_log2$padj < 0.1, ]
+dim(resHN_ord_log2)
+dim(res_HN)
+```
+
+```{r}
+# NON-TNBC VS NORMAL
+res_NN <- results(dds_p, contrast = c('Condition', 'NTNBC', 'H'))
+
+resNN_ord_log2 <- res_NN[order(abs(res_NN$log2FoldChange), decreasing = TRUE),] # sort the genes according to descending log2FoldChange
+resNN_ord_log2 <- resNN_ord_log2[!is.na(resNN_ord_log2$padj), ] # exclude gene with padj as NA
+resNN_ord_log2 <- resNN_ord_log2[resNN_ord_log2$padj < 0.1, ]
+dim(resNN_ord_log2)
+dim(res_NN)
+```
+
+```{r}
+hist(res_TN$pvalue)
+```
+
+
+```{r}
+use <- res_TN$baseMean > metadata(res_TN)$filterThreshold
+h1 <- hist(res_TN$pvalue[!use], breaks=0:50/50, plot=FALSE)
+h2 <- hist(res_TN$pvalue[use], breaks=0:50/50, plot=FALSE)
+colori <- c(`do not pass`="khaki", `pass`="powderblue")
+
+barplot(height = rbind(h1$counts, h2$counts), beside = FALSE,
+        col = colori, space = 0, main = "", ylab="frequency", xlab = 'p-value')
+text(x = c(0, length(h1$counts)), y = 0, label = paste(c(0,1)),
+     adj = c(0.5,1.7), xpd=NA)
+legend("topright", fill=rev(colori), legend=rev(names(colori)))
+```
+
+```{r}
+W <- res_TN$stat
+maxCooks <- apply(assays(dds_p)[["cooks"]],1,max)
+idx <- !is.na(W)
+plot(rank(W[idx]), maxCooks[idx], xlab="rank of Wald statistic", 
+     ylab="maximum Cook's distance per gene",
+     ylim=c(0,5), cex=.4, col=rgb(0,0,0,.3))
+m <- ncol(dds)
+p <- 3
+abline(h=qf(.99, p, m - p))
+```
+
+```{r}
+summary(res_TN)
+summary(res_HN)
+summary(res_NN)
+```
+
+
+Find common genes in the above 3 tables, i.e. genes that are differentially expressed in all 3 types of cancers:
+```{r}
+gene_com <- intersect(intersect(rownames(resHN_ord_log2), rownames(resTN_ord_log2)), rownames(resNN_ord_log2))
+
+# plot the normalized counts of some sample common genes
+par(mfrow = c(2,2))
+
+p1 <- plotCounts(dds_p, gene = gene_com[1], intgroup = 'Condition' )
+p2 <-plotCounts(dds_p, gene = gene_com[2], intgroup = 'Condition' )
+p3 <-plotCounts(dds_p, gene = gene_com[3], intgroup = 'Condition' )
+p4 <-plotCounts(dds_p, gene = gene_com[4], intgroup = 'Condition' )
+```
+
+Plot the difference in log2FoldChange in different cancer types:
+```{r}
+temp_TN <- as.matrix(resTN_ord_log2[rownames(resTN_ord_log2) %in% gene_com,])
+temp_HN <- as.matrix(resHN_ord_log2[rownames(resHN_ord_log2) %in% gene_com,])
+temp_NN <- as.matrix(resNN_ord_log2[rownames(resNN_ord_log2) %in% gene_com,])
+
+colnames(temp_TN) <- c('baseMean_TN', 'log2FoldChange_TN', 'lfcSE_TN', 'stat_TN', 'pvalue_TN', 'padj_TN')
+colnames(temp_HN) <- c('baseMean_HN', 'log2FoldChange_HN', 'lfcSE_HN', 'stat_HN', 'pvalue_HN', 'padj_HN')
+colnames(temp_NN) <- c('baseMean_NN', 'log2FoldChange_NN', 'lfcSE_NN', 'stat_NN', 'pvalue_NN', 'padj_NN')
+
+temp_1 <- merge(temp_TN, temp_HN, by = 'row.names')
+rownames(temp_1) <- temp_1$Row.names
+
+res_common_H <- merge(temp_NN, temp_1, by = 'row.names')
+res_common_H <- res_common_H[, colnames(res_common_H) != 'Row.names.y']
+head(res_common_H)
+
+```
+
+```{r}
+# plot the different log2FoldChange per gene
+res_plot <- left_join(res_common_H, gene_mapping, by = c("Row.names" = "Gene.ID"))
+
+# reshape res_plot for plotting
+library(reshape2)
+
+res_plot <- melt(res_plot[c(3, 9, 15, 21)], id.vars="Gene.Name")
+res_plot$Gene.Name[is.null(res_plot$Gene.Name)] <- 'na'
+res_plot<-res_plot[order(res_plot$Gene.Name),]
+```
+
+```{r}
+dim(res_common_H)
+sum(is.na(res_plot$variable))
+```
+
+Common genes with padj < 0.1 and LFC > 2
+```{r}
+# get common DEGs with abs(LFC) > 2
+hn_lfc <- rownames(res_HN)[rownames(res_HN) %in% gene_com & res_HN$padj < 0.1 & res_HN$log2FoldChange > 2]
+tn_lfc <- rownames(res_TN)[rownames(res_TN) %in% gene_com & res_TN$padj < 0.1 & res_TN$log2FoldChange > 2]
+nn_lfc <- rownames(res_NN)[rownames(res_NN) %in% gene_com & res_NN$padj < 0.1 & res_NN$log2FoldChange > 2]
+
+deseq_lfc <- Reduce(intersect, list(hn_lfc, tn_lfc, nn_lfc))
+length(deseq_lfc)
+```
+
+
+```{r}
+#ggplot(res_plot[83:382,], aes(x = Gene.Name, y = value, color = as.character(variable), group = variable) ) + geom_point(alpha = 0.9) + 
+#    theme(axis.text.x = element_text(angle = 90, size = 8), legend.position = 'bottom')
+```
+
+For common genes, the log2FoldChange in general follows the same trend when compared against healthy samples.
+
+## 2.2 Unique DEGs found per cancer type
+
+```{r}
+deg_her2 <- rownames(resHN_ord_log2)
+deg_tnbc <- rownames(resTN_ord_log2)
+deg_ntnbc <- rownames(resNN_ord_log2)
+
+length(deg_her2)
+length(deg_tnbc)
+length(deg_ntnbc)
+head(deg_her2)
+```
+
+### 2.2.1 DEGs unique in HER2
+
+Find DEGs that only have differential expression in HER2, but not in TNBC or NTNBC.
+
+```{r}
+deg_her2_uniq <- c()
+
+for (gene in deg_her2) {
+  if (!(gene %in% deg_tnbc) & !(gene %in% deg_ntnbc)){
+    #gene_name <- gene_mapping$Gene.Name[gene_mapping$Gene.ID == gene]
+    deg_her2_uniq <- c(deg_her2_uniq, gene)
+    # deg_her2_uniq <- c(deg_her2_uniq, gene_name)
+
+  }
+}
+length(deg_her2_uniq)
+head(deg_her2_uniq)
+```
+
+Filter the 2829 DEGs so that padj < 0.1 and abs(log2FoldChang) > 2
+```{r}
+deg_her2_uniq_res <- res_HN[(rownames(res_HN) %in% deg_her2_uniq) & (res_HN$padj < 0.1) & (abs(res_HN$log2FoldChange) > 2), ]
+deg_her2_uniq_res
+```
+
+
+### 2.2.2 DEGs unique in TNCB
+
+Find DEGs that only have differential expression in TNBC, but not in HER2 or NTNBC.
+
+```{r}
+deg_tnbc_uniq <- c()
+
+for (gene in deg_tnbc) {
+  if (!(gene %in% deg_her2) & !(gene %in% deg_ntnbc)){
+    #gene_name <- gene_mapping$Gene.Name[gene_mapping$Gene.ID == gene]
+    #deg_tnbc_uniq <- c(deg_tnbc_uniq, gene_name)
+    deg_tnbc_uniq <- c(deg_tnbc_uniq, gene)
+  }
+}
+length(deg_tnbc_uniq)
+```
+
+Filter the 5388 DEGs so that padj < 0.1 and abs(log2FoldChang) > 2
+```{r}
+deg_tnbc_uniq_res <- res_TN[(rownames(res_TN) %in% deg_tnbc_uniq) & (res_TN$padj < 0.1) & (abs(res_TN$log2FoldChange) > 2), ]
+deg_tnbc_uniq_res
+```
+
+
+Find DEGs that only have differential expression in NTNBC, but not in HER2 or TNBC.
+
+```{r}
+deg_ntnbc_uniq <- c()
+
+for (gene in deg_ntnbc) {
+  if (!(gene %in% deg_her2) & !(gene %in% deg_tnbc)){
+    #gene_name <- gene_mapping$Gene.Name[gene_mapping$Gene.ID == gene]
+    #deg_ntnbc_uniq <- c(deg_ntnbc_uniq, gene_name)
+    deg_ntnbc_uniq <- c(deg_ntnbc_uniq, gene)
+  }
+}
+length(deg_ntnbc_uniq)
+```
+
+Filter the 1455 DEGs so that padj < 0.1 and abs(log2FoldChang) > 2
+```{r}
+deg_ntnbc_uniq_res <- res_NN[(rownames(res_NN) %in% deg_ntnbc_uniq) & (res_NN$padj < 0.1) & (abs(res_NN$log2FoldChange) > 2), ]
+deg_ntnbc_uniq_res
+```
+
+Shrunken log2FoldChange:
+```{r}
+#resultsNames(dds_p)
+library(apeglm)
+resLFC_HN <- lfcShrink(dds_p, coef = 'Condition_HER2_vs_H', type = 'apeglm')
+resLFC_NN <- lfcShrink(dds_p, coef = 'Condition_NTNBC_vs_H', type = 'apeglm')
+resLFC_TN <- lfcShrink(dds_p, coef = 'Condition_TNBC_vs_H', type = 'apeglm')
+
+```
+
+MA-plot of the 3 comparison groups:
+```{r}
+# HN
+par(mfrow = c(1,2))
+
+p1 <- plotMA(res_HN, ylim = c(-4,4), main = 'Original LFC')
+p2 <- plotMA(resLFC_HN, ylim = c(-4,4), main = 'Shrinked LFC')
+
+```
+
+```{r}
+# TN
+par(mfrow = c(1,2))
+
+p1 <- plotMA(res_TN, ylim = c(-4,4), main = 'Original LFC')
+p2 <- plotMA(resLFC_TN, ylim = c(-4,4), main = 'Shrinked LFC')
+
+```
+
+```{r}
+# NN
+par(mfrow = c(1,2))
+
+p1 <- plotMA(res_NN, ylim = c(-4,4),  main = 'Original LFC')
+p2 <- plotMA(resLFC_NN, ylim = c(-4,4),  main = 'Shrinked LFC')
+
+```
+
+# 3. Extract significant genes as features for sample clustering (DESeq2)
+
+Use genes found in section 2 as features to perform sample clustering:
+```{r}
+# consolidate the genes
+sig_gene <- c(rownames(deg_ntnbc_uniq_res), rownames(deg_tnbc_uniq_res), rownames(deg_her2_uniq_res))
+# convert the gene name to gene id
+sig_gene <- gene_mapping$Gene.ID[gene_mapping$Gene.Name %in% sig_gene]
+
+# consolidate the gene ids again and remove any duplicate
+sig_gene <- c(sig_gene, res_common_H$Row.names)
+sig_gene <- unique(sig_gene)
+length(sig_gene)
+```
+
+Filter the original df to include only the 8549 genes:
+```{r}
+# get the rlog transformed gene counts
+res_rld <- data.frame(assay(rlog(dds_p)))
+# filter by the 195 genes
+df_sub <- res_rld[rownames(res_rld) %in% sig_gene,]
+head(df_sub)
+```
+
+As the 8549 genes might have colinearity (e.g. coexpression of genes), will perform PCA and use PCs as features to reduce colinearity.
+```{r}
+rld_pca <- prcomp(t(df_sub), scale = T, center = T)
+summary(rld_pca)
+```
+
+Choose the first 14 PCs with 95% of variance coverage as features for clustering
+```{r}
+post_pca = rld_pca$x[,1:14]
+```
+
+Hierachical clustering
+```{r}
+set.seed(127)
+#comput the distance bewteen the samples using euclidean distance
+dist <- dist(post_pca, method = 'euclidean')
+
+# hierachical clustering using Ward's criterion
+hclust_ward <- hclust(dist, method = 'ward.D2')
+fviz_dend(hclust_ward, repel = TRUE)
+```
+
+```{r}
+# select the number of clusters
+fviz_nbclust(post_pca, FUNcluster = hcut, method = 'silhouette')
+```
+
+```{r}
+# K = 3
+# cut the dendrogram with k = 3
+cut_ward <- cutree(hclust_ward, k = 2)
+
+# plot the dengrogram with 3 clusters
+fviz_dend(hclust_ward, k = 2, rect = TRUE, color_labels_by_k = TRUE, type = "rectangle", show_labels = TRUE)
+```
+
+```{r}
+# plot the cluster in PCA
+fviz_cluster(object = list(data = post_pca, cluster = cut_ward), stand = FALSE, geom = c("point", "text"), repel = T, main = 'HCL clustering')
+```
+
+Plot the original subtypes on PCA plot for comparison:
+```{r}
+fviz_pca_ind(rld_pca, geom = c("point", "text"), labelsize = 3, habillage = meta$Condition, title = 'PCA - Categorized by cancer subtype labels', repel = T)
+```
+
+The features fail to recognize the difference among the cancer subtypes. Cluster 1 contains samples of HER2, TNCB and NTNBC, whereas Cluster 2 contains only Healthy samples. 
+
+This is not surprising as the DEGs were identified by comparing cancer samples against healthy samples, hence, have good performance in differentiating healthy samples from cancer ones, but not so good when differentiate among different cancer subtypes.
+
+# 4. Differential Expression Analysis using Limma-Voom
+
+Setup
+```{r}
+library(edgeR)
+# limma is loaded as dependency
+```
+
+```{r}
+# create DGEList object
+d1 <- DGEList(df)
+# calculate normalization factors
+d0 <- calcNormFactors(d1)
+d0
+```
+
+Extract group info from meta in the same order as sample sequence in df
+```{r}
+meta <- meta[match(colnames(df), meta$Run),]
+group <- as.factor(meta$Condition)
+```
+
+Filter low-expressed genes
+```{r}
+keep.exprs <- filterByExpr(d0, group=group)
+d <- d0[keep.exprs,, keep.lib.sizes=FALSE]
+dim(d)
+```
+
+```{r}
+# plot the distribution of genes before/after filtration
+cpm <- cpm(d0)
+lcpm <- cpm(d0, log=TRUE)
+
+L <- mean(d0$samples$lib.size) * 1e-6
+M <- median(d0$samples$lib.size) * 1e-6
+
+lcpm.cutoff <- log2(10/M + 2/L)
+library(RColorBrewer)
+nsamples <- ncol(d0)
+col <- colorRampPalette(brewer.pal(8, "Paired"))(19)
+par(mfrow=c(1,2))
+plot(density(lcpm[,1]), col=col[1], lwd=2, ylim=c(0,0.26), las=2, main="", xlab="")
+title(main="A. Raw data", xlab="Log-cpm")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+  den <- density(lcpm[,i])
+  lines(den$x, den$y, col=col[i], lwd=2)
+}
+# legend("topright", samplenames, text.col=col, bty="n")
+lcpm <- cpm(d, log=TRUE)
+plot(density(lcpm[,1]), col=col[1], lwd=2, ylim=c(0,0.26), las=2, main="", xlab="")
+title(main="B. Filtered data", xlab="Log-cpm")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+  den <- density(lcpm[,i])
+  lines(den$x, den$y, col=col[i], lwd=2)
+}
+#legend("topright", samplenames, text.col=col, bty="n")
+```
+
+Unsupervised clustering of samples:
+```{r}
+lcpm <- cpm(d, log=TRUE)
+
+col.group <- group
+levels(col.group) <- brewer.pal(nlevels(col.group), "Set1")
+col.group <- as.numeric(col.group)
+plotMDS(lcpm, labels=group, col=col.group)
+title(main="Sample groups")
+```
+
+
+
+Specify the model to be fitted before using voom, as voom uses variances of the model residuals:
+```{r}
+mm <- model.matrix(~ 0 + group)
+mm
+# model where each coefficient corresponds to a group mean
+y <- voom(d, mm, plot=T)
+y
+```
+
+```{r}
+contr.matrix <- makeContrasts(
+   HC = groupHER2 - groupH, 
+   TC = groupTNBC - groupH, 
+   NC = groupNTNBC - groupH, 
+   levels = colnames(mm))
+contr.matrix
+# HT = groupHER2 - groupTNBC,
+# HN = groupHER2 - groupNTNBC,
+# TN = groupTNBC - groupNTNBC,
+```
+
+
+```{r}
+fit <- lmFit(y, mm)
+vfit <- contrasts.fit(fit, contrasts=contr.matrix)
+efit <- eBayes(vfit)
+#efit <- eBayes(fit)
+plotSA(efit, main="Final model: Mean-variance trend")
+```
+
+Examine the number of DE genes
+```{r}
+dt <- decideTests(efit, p.value = 0.1, lfc = 2)
+summary(dt)
+dt
+```
+
+```{r}
+de.common <- rownames(dt)[which(dt[,1]!=0 & dt[,2]!=0 & dt[,3]!=0)]
+length(de.common)
+# graph of all DEGs
+vennDiagram(dt[,1:3], circle.col = c('turquoise', 'salmon', 'bisque4'))
+title(main="All DEGs")
+```
+
+```{r}
+# graph of all up-regulated DEGs
+dt_up <- dt[dt[,1] == 1 | dt[,2]==1 | dt[,3]==1,]
+vennDiagram(dt_up[,1:3], circle.col = c('turquoise', 'salmon', 'bisque3'))
+title(main="Up-regulated DEGs")
+```
+
+```{r}
+# graph of all down-regulated DEGs
+dt_down <- dt[dt[,1] == -1 | dt[,2]== -1 | dt[,3]== -1,]
+vennDiagram(dt_down[,1:3], circle.col = c('turquoise', 'salmon', 'bisque3'))
+title(main="Down-regulated DEGs")
+```
+
+# 5. Sample Clustering using DEGs identified (by Limma-Voom)
+
+Filter the original df to include only the de.common genes:
+```{r}
+# get the rlog transformed gene counts
+res_rld_voom <- data.frame(rlog(d$counts))
+# filter by the 195 genes
+df_sub_voom <- res_rld_voom[rownames(res_rld_voom) %in% de.common,]
+head(df_sub_voom)
+```
+
+As the 2875 genes might have colinearity (e.g. coexpression of genes), will perform PCA and use PCs as features to reduce colinearity.
+```{r}
+rld_pca_voom <- prcomp(t(df_sub_voom), scale = T, center = T)
+summary(rld_pca_voom)
+```
+
+
+Choose the first 13 PCs with 95% of variance coverage as features for clustering
+```{r}
+post_pca_voom = rld_pca_voom$x[,1:13]
+```
+
+Hierachical clustering
+```{r}
+set.seed(127)
+#comput the distance bewteen the samples using euclidean distance
+dist <- dist(post_pca_voom, method = 'euclidean')
+
+# hierachical clustering using Ward's criterion
+hclust_ward <- hclust(dist, method = 'mcquitty')
+fviz_dend(hclust_ward, repel = TRUE)
+```
+
+```{r}
+# select the number of clusters
+fviz_nbclust(post_pca_voom, FUNcluster = hcut, method = 'silhouette')
+```
+
+```{r}
+# K = 2
+# cut the dendrogram with k = 2
+cut_ward <- cutree(hclust_ward, k = 2)
+
+# plot the dengrogram with 3 clusters
+fviz_dend(hclust_ward, k = 2, rect = TRUE, color_labels_by_k = TRUE, type = "rectangle", show_labels = TRUE)
+```
+
+```{r}
+# plot the cluster in PCA
+fviz_cluster(object = list(data = post_pca_voom, cluster = cut_ward), stand = FALSE, geom = c("point", "text"), repel = T, main = 'HCL clustering')
+```
+
+Plot the original subtypes on PCA plot for comparison:
+```{r}
+fviz_pca_ind(rld_pca_voom, geom = c("point", "text"), labelsize = 3, habillage = meta$Condition, title = 'PCA - Categorized by cancer subtype labels', repel = T)
+```
+
+# 6. Overlapping DEGs from DESeq2 and Limma-Voom
+
+```{r}
+# common DEGs among 3 subtypes:
+length(Reduce(intersect, list(de.common, deseq_lfc)))
+```
+
+```{r}
+#HER2 -voom with lfc filter
+her2_v <- rownames(dt)[dt[,1] != 0 & dt[,2] == 0 & dt[,3] == 0]
+length(her2_v)
+```
+
+```{r}
+# HER2 -DESEq2 with lfc filter
+length(intersect(rownames(deg_her2_uniq_res), her2_v)) # overlap with LFC filter of 2
+```
+
+```{r}
+#TNBC
+tnbc_v <- rownames(dt)[dt[,2] != 0 & dt[,1] == 0 & dt[,3] == 0]
+length(tnbc_v)
+length(intersect(rownames(deg_tnbc_uniq_res), tnbc_v))
+```
+
+```{r}
+#NTNBC
+ntnbc_v <- rownames(dt)[dt[,3] != 0 & dt[,1] == 0 & dt[,2] == 0]
+length(ntnbc_v)
+length(intersect(rownames(deg_ntnbc_uniq_res), ntnbc_v))
+```
