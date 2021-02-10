@@ -1,5 +1,5 @@
 ---
-title: "BS6202_Group Project"
+title: "DEG analysis of breast cancer subtypes using DESeq2 & Limma Voom"
 date: "1/15/2021"
 output: html_document
 ---
